@@ -10,14 +10,15 @@ import cv2
 from PIL import Image
 from argparse import Namespace
 import matplotlib.pyplot as plt
-
 from gs2mesh_utils.transformation_utils import get_shading
 
 import sys
-sys.path.append(os.path.abspath(os.path.join(__file__, '..', '..', 'third_party', 'DLNR')))
-from core.dlnr import DLNR
-from core.utils.utils import InputPadder as DLNR_InputPadder
+sys.path.append(os.path.abspath(os.path.join(__file__, '..', '..', 'third_party', 'DEFOM-Stereo')))
+from core.defom_stereo import DEFOMStereo
+from core.utils.utils import InputPadder
+import glob
 
+from pathlib import Path
 # =============================================================================
 #  Class for stereo matching model
 # =============================================================================
@@ -36,34 +37,35 @@ class Stereo:
         self.base_dir = base_dir
         self.renderer = renderer
         self.args = args
-        self.model_name = self.args.stereo_model
+        self.model_name = "Defom"
         self.device = device
-        self.disparity_signs = {'DLNR_Middlebury': -1, 'DLNR_SceneFlow': -1}
-
-        if "DLNR" in self.model_name:
-            DLNR_args = Namespace(corr_implementation='reg', 
-                                  corr_levels=4, 
-                                  corr_radius=4, 
-                                  dataset='things', 
-                                  hidden_dims=[128, 128, 128], 
-                                  mixed_precision=True, 
-                                  n_downsample=2, 
-                                  n_gru_layers=3, 
-                                  restore_ckpt=os.path.join(self.base_dir, 'third_party', 'DLNR', 'pretrained', f'{self.model_name}.pth'),
-                                  shared_backbone=False, 
-                                  slow_fast_gru=False, 
-                                  valid_iters=10)
-            DLNR_model = torch.nn.DataParallel(DLNR(DLNR_args), device_ids=[0])
-            DLNR_model.load_state_dict(torch.load(DLNR_args.restore_ckpt))
-            DLNR_model = DLNR_model.module
-            DLNR_model.to(self.device)
-            DLNR_model.eval()
-            self.model = DLNR_model
-            self.input_padder = DLNR_InputPadder
-            self.model_args = DLNR_args
+        self.model_args = Namespace(valid_iters = 32,
+                                    scale_iters = 8)
+        
+        args.restore_ckpt = 'third_party/DEFOM-Stereo/checkpoints/defomstereo_vitl_sceneflow.pth'
+        args.dinov2_encoder = 'vitl'
+        args.idepth_scale = 0.5
+        args.hidden_dims = [128]*3
+        args.corr_implementation = 'reg'
+        args.corr_levels = 2
+        args.corr_radius = 4
+        args.scale_list = [0.125, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        args.scale_corr_radius = 2
+        args.n_downsample = 2
+        args.context_norm = "batch"
+        args.n_gru_layers = 3
+        args.mixed_precision = False
+        self.model = DEFOMStereo(args)
+        checkpoint = torch.load(args.restore_ckpt, map_location='cuda')
+        if 'model' in checkpoint:
+                self.model.load_state_dict(checkpoint['model'])
         else:
-            print("MODEL NOT SUPPORTED")
-            return
+            self.model.load_state_dict(checkpoint)
+
+        self.model.to(self.device)
+        self.model.eval()
+        self.model = torch.nn.DataParallel(self.model)
+
 
     def load_image(self, imfile):
         """
@@ -79,7 +81,7 @@ class Stereo:
         img = torch.from_numpy(img).permute(2, 0, 1).float()
         return img[None].to(self.device)
     
-    def run(self, start=0, visualize=False):
+    def run(self, start=0, visualize=False, resolution = 1):
         """
         Run the stereo model: render a pair of images and compute the disparity and depth using the stereo model.
 
@@ -101,10 +103,10 @@ class Stereo:
                 
                 image1 = self.load_image(os.path.join(output_dir, 'left.png'))
                 image2 = self.load_image(os.path.join(output_dir, 'right.png'))
-
+                #print(f"shape = {image1.shape}")
                 disparities = {'LR': None, 'RL': None}
                 for direction in ['LR', 'RL']:
-                    padder = self.input_padder(image1.shape, divis_by=32)
+                    padder = InputPadder(image1.shape, divis_by=32)
                     image1, image2 = padder.pad(image1, image2)
                     if direction == 'LR':
                         image1_to_model = image1
@@ -113,15 +115,15 @@ class Stereo:
                         image1_to_model = torch.flip(image2, dims=[3])
                         image2_to_model = torch.flip(image1, dims=[3])
                     
-                    prev_flow, flow_up = self.model(image1_to_model, image2_to_model, iters=self.model_args.valid_iters, test_mode=True, flow_init=prev_flows[direction] if self.args.stereo_warm else None)
+                    with torch.no_grad():
+                        #print('mo')
+                        disp_pr = self.model(image1_to_model, image2_to_model, iters = self.model_args.valid_iters, scale_iters = self.model_args.scale_iters, test_mode=True)
+                        #print('del')
+                    #prev_flow, flow_up = self.model(image1_to_model, image2_to_model, iters=self.model_args.valid_iters, test_mode=True, flow_init=prev_flows[direction] if self.args.stereo_warm else None)
                     if direction == 'RL':
-                        prev_flow = torch.flip(prev_flow, dims=[3])
-                        flow_up = torch.flip(flow_up, dims=[3])
-                    flow_up = padder.unpad(flow_up).squeeze()
-                    
-                    prev_flows[direction] = prev_flow
-                    
-                    disparities[direction] = self.disparity_signs[self.model_name] * flow_up.detach().cpu().numpy().squeeze()
+                        disp_pr = torch.flip(disp_pr, dims=[3])
+                        
+                    disparities[direction] = padder.unpad(disp_pr).cpu().squeeze().numpy()
                     
                     output_directory = os.path.join(output_dir, f'out_{self.model_name}')
                     os.makedirs(output_directory, exist_ok=True)
@@ -131,13 +133,18 @@ class Stereo:
                         
                 occlusion_mask = self.get_occlusion_mask(disparities['LR'], disparities['RL'], self.args.stereo_occlusion_threshold)
                 depth = (left_camera['fx'] * baseline) / (disparities['LR'])
-                
+                depth_right = (left_camera['fx'] * baseline) / (disparities['RL'])
+                #print('depth')
+                #print(np.max(depth))
+                #print(f"mean = {np.mean(depth)}")
                 np.save(os.path.join(output_directory, "occlusion_mask.npy"), occlusion_mask)
                 plt.imsave(os.path.join(output_directory, "occlusion_mask.png"), occlusion_mask)
                 np.save(os.path.join(output_directory, "depth.npy"), depth)
                 cv2.imwrite(os.path.join(output_directory, 'depth.png'), depth)            
                 shading = get_shading(depth, self.args.stereo_shading_eps)
+                shading_right = get_shading(depth_right, self.args.stereo_shading_eps)
                 cv2.imwrite(os.path.join(output_directory, 'shading.png'), shading)
+                cv2.imwrite(os.path.join(output_directory, 'shading_right.png'), shading_right)
                 
                 if visualize:
                     print(f"baseline: {baseline}")
@@ -177,6 +184,39 @@ class Stereo:
         occlusion_mask = occlusion_mask > 0.5
         
         return ~occlusion_mask
+
+    def get_right_occlusion_mask(self, L2R_disparity, R2L_disparity, occlusion_threshold):
+        """
+        Calculate the occlusion mask given a pair of disparities.
+
+        Parameters:
+        L2R_disparity (np.ndarray): Left-to-right disparity map.
+        R2L_disparity (np.ndarray): Right-to-left disparity map.
+        occlusion_threshold (int): Threshold on the reprojection error.
+
+        Returns:
+        np.ndarray: Binary occlusion mask where 0 indicates occluded pixels and 1 indicates visible pixels.
+        """
+        height, width = L2R_disparity.shape
+    
+        x_grid, y_grid = np.meshgrid(np.arange(width), np.arange(height))
+        
+        x_projected = (x_grid + L2R_disparity).astype(np.int32)
+        x_projected_clipped = np.clip(x_projected, 0, width - 1)
+        
+        x_reprojected = x_projected_clipped - R2L_disparity[y_grid, x_projected_clipped]
+        x_reprojected_clipped = np.clip(x_reprojected, 0, width - 1)
+        
+        disparity_difference = np.abs(x_grid - x_reprojected_clipped)
+    
+        occlusion_mask = (disparity_difference > occlusion_threshold).astype(np.uint8)
+        
+        occlusion_mask[(x_projected < 0) | (x_projected >= width)] = 1
+
+        occlusion_mask = occlusion_mask > 0.5
+        
+        return ~occlusion_mask
+
 
     def view_results_single(self, camera_number):
         """

@@ -13,6 +13,7 @@ import plotly.io as pio
 import cv2
 import copy
 
+from gs2mesh_utils.transformation_utils import get_shading
 from gs2mesh_utils.io_utils import read_ply
 import gs2mesh_utils.third_party.visualization.visualize as visualize
 
@@ -31,12 +32,12 @@ class TSDF:
         args (ArgParser): Program arguments.
         out_name (str): Output name for saving the mesh.
         """
-        self.model_name = stereo.model_name
+        self.model_name = "Defom"
         self.renderer = renderer
         self.out_name = out_name
         self.args = args
 
-    def run(self, visualize=False):
+    def run(self, visualize=False, resolution=1):
         """
         Run the TSDF fusion algorithm.
 
@@ -65,6 +66,11 @@ class TSDF:
             output_dir = self.renderer.render_folder_name(camera_number)
             image = np.array(Image.open(os.path.join(output_dir, 'left.png'))).astype(np.uint8)
             depth = np.load(os.path.join(output_dir, f'out_{self.model_name}', 'depth.npy'))
+
+            depth = depth/resolution
+
+            
+
             if  self.args.TSDF_use_mask:
                 object_mask = (np.load(os.path.join(output_dir, 'left_mask.npy')).astype(bool))
                 if  self.args.TSDF_invert_mask:
@@ -80,16 +86,17 @@ class TSDF:
                 occlusion_mask = np.load(os.path.join(output_dir, f'out_{self.model_name}', 'occlusion_mask.npy')).astype(bool)
                 depth = depth * occlusion_mask
 
-            depth = np.where(depth <  self.args.TSDF_min_depth_baselines * self.renderer.baseline, 0, depth)
+            #depth = np.where(depth <  self.args.TSDF_min_depth_baselines * self.renderer.baseline, 0, depth)
 
             extrinsic_matrix = left_camera['extrinsic'].copy()
             extrinsic_matrix[:3, 3] /=  self.args.TSDF_scale
-
             depth_o3d = o3d.geometry.Image((depth).astype(np.float32))
 
             rgb_o3d = o3d.geometry.Image(image)
 
+            self.args.TSDF_max_depth_baselines = 150
             depth_trunc = self.renderer.baseline *  self.args.TSDF_max_depth_baselines /  self.args.TSDF_scale
+
             rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(rgb_o3d, depth_o3d, depth_scale= self.args.TSDF_scale, depth_trunc=depth_trunc, convert_rgb_to_intensity=False)
 
             if visualize:
@@ -103,8 +110,21 @@ class TSDF:
                 plt.show()
                 print(f"minimal depth: {np.asarray(rgbd_image.depth)[np.asarray(rgbd_image.depth) != 0].min()}, maximal depth: {np.asarray(rgbd_image.depth).max()}")
             
-            intrinsics = o3d.camera.PinholeCameraIntrinsic(left_camera['width'], left_camera['height'], left_camera['fx'], left_camera['fy'], left_camera['cx'], left_camera['cy'])
+
+            
+            intrinsics = o3d.camera.PinholeCameraIntrinsic(int(left_camera['width']/resolution), 
+                                                           int(left_camera['height']/resolution), 
+                                                           left_camera['fx']/resolution, 
+                                                           left_camera['fy']/resolution,
+                                                           left_camera['cx']/resolution, 
+                                                           left_camera['cy']/resolution)
+            
+
             volume.integrate(rgbd_image, intrinsics, np.linalg.inv(extrinsic_matrix))
+            depth = np.asarray(rgbd_image.depth)
+            image = np.asarray(rgbd_image.color)
+            shading = get_shading(depth, 1e-4)
+
         self.mesh = volume.extract_triangle_mesh()
         self.mesh.scale( self.args.TSDF_scale, (0, 0, 0))
         self.mesh.compute_vertex_normals()
@@ -140,6 +160,35 @@ class TSDF:
         self.clean_mesh.remove_unreferenced_vertices()
         o3d.io.write_triangle_mesh(os.path.join(self.renderer.output_dir_root, f'{self.out_name}_cleaned_mesh.ply'), self.clean_mesh)
         print("SAVED CLEANED MESH")
+
+    def post_process_mesh(self, mesh, cluster_to_keep=50):
+        """
+        Post-process a mesh to filter out floaters and disconnected parts
+        """
+        import copy
+        print("post processing the mesh to have {} clusterscluster_to_kep".format(cluster_to_keep))
+        mesh_0 = copy.deepcopy(mesh)
+        with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
+                triangle_clusters, cluster_n_triangles, cluster_area = (mesh_0.cluster_connected_triangles())
+
+        triangle_clusters = np.asarray(triangle_clusters)
+        cluster_n_triangles = np.asarray(cluster_n_triangles)
+        cluster_area = np.asarray(cluster_area)
+        n_cluster = np.sort(cluster_n_triangles.copy())[-cluster_to_keep]
+        n_cluster = max(n_cluster, 50) # filter meshes smaller than 50
+        triangles_to_remove = cluster_n_triangles[triangle_clusters] < n_cluster
+        mesh_0.remove_triangles_by_mask(triangles_to_remove)
+        mesh_0.remove_unreferenced_vertices()
+        mesh_0.remove_degenerate_triangles()
+        print("num vertices raw {}".format(len(mesh.vertices)))
+        print("num vertices post {}".format(len(mesh_0.vertices)))
+        return mesh_0
+
+    def clean_mesh_for_sparse_view(self):
+        cleaned_mesh = self.post_process_mesh(self.mesh)
+        o3d.io.write_triangle_mesh(os.path.join(self.renderer.output_dir_root, f'{self.out_name}_cleaned_mesh.ply'), cleaned_mesh)
+        print("SAVED CLEANED MESH FOR SPARSE VIEW")
+
 
     def visualize_mesh(self, subsample=100, GT_path=None, show_clean=True):
         """

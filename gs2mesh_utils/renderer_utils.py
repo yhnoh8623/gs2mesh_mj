@@ -14,13 +14,15 @@ import copy
 from scipy.optimize import least_squares
 
 from gs2mesh_utils.colmap_utils import poses_from_file
-from gs2mesh_utils.transformation_utils import rotm2eul, eul2rotm, intrinsic_from_camera_params, RT_from_rot_pos, convert_R_T_to_GS, calculate_right_camera_pose
+from gs2mesh_utils.transformation_utils import get_shading, rotm2eul, eul2rotm, intrinsic_from_camera_params, RT_from_rot_pos, convert_R_T_to_GS, calculate_right_camera_pose
 from gs2mesh_utils.io_utils import read_ply
 import gs2mesh_utils.third_party.visualization.visualize as visualize
 from gs2mesh_utils.third_party.colmap_runner.utils.read_write_model import read_cameras_text
 
+
 import sys
-sys.path.append(os.path.abspath(os.path.join(__file__, '..', '..', 'third_party', 'gaussian-splatting')))
+sys.path.append(os.path.abspath(os.path.join(__file__, '..', '..', 'third_party', 'gaussian-splatting'))) # 여기 바꾸면 될듯하다.
+
 from arguments import ModelParams, PipelineParams
 from gaussian_renderer import render
 from scene import Scene, GaussianModel, cameras
@@ -117,21 +119,23 @@ class Renderer:
         experiment_name (str): Name of the experiment. Use if you want to override the default name.
         device (str): Device to run the model on (e.g., 'cuda' or 'cpu').
         """
-
+        eval = False # eval set True or False!
         self.args = args
         self.render_name = args.colmap_name
         self.white_background = args.GS_white_background
         self.base_dir = base_dir
         self.colmap_dir = colmap_dir
+        
         self.output_dir_root = output_dir_root
         self.device = device
         self.splatting_iteration = args.GS_iterations
-        self.splatting_dir = os.path.join(base_dir, 'splatting_output', splatting, self.render_name)
+        self.splatting_dir = os.path.join(base_dir, 'splatting_output', self.render_name)
         splatting_ply_file_path = os.path.join(self.splatting_dir, 'point_cloud', f"iteration_{self.splatting_iteration}", 'point_cloud.ply')
+        self.poses = poses_from_file(os.path.join(self.colmap_dir,'sparse','0','images.txt'), eval)
         
-        self.poses = poses_from_file(os.path.join(self.colmap_dir,'sparse','0','images.txt'))
         
         poses_inv = [np.linalg.inv(np.vstack((pose, np.array([0, 0, 0, 1])))) for pose in self.poses]
+        #print(f"pose len = {len(poses_inv)}")
         camera_rotations = [rotm2eul(pose[:3,:3]) for pose in poses_inv]
         for i in range(len(camera_rotations)):
             rotation = eul2rotm(camera_rotations[i])
@@ -139,11 +143,15 @@ class Renderer:
             camera_rotations[i] = rotm2eul(rotation)
 
         camera_locations = [pose[:3,3].tolist() for pose in poses_inv]
+        # print(f"camera_rotations")
+        # for loc in camera_rotations:
+        #     print(loc)
         
         camera_params = read_cameras_text(os.path.join(self.colmap_dir,'sparse','0','cameras.txt'))
         camera_params_indices = sorted(list(camera_params.keys()))
-        camera_params = [{'width':camera_params[i].width, 
-                          'height':camera_params[i].height, 
+        resolution = 1
+        camera_params = [{'width':int(camera_params[i].width/resolution), 
+                          'height':int(camera_params[i].height/resolution), 
                           'fx':camera_params[i].params[0], 
                           'fy':camera_params[i].params[0 if camera_params[i].model=='SIMPLE_RADIAL' else 1], 
                           'cx':camera_params[i].params[1 if camera_params[i].model=='SIMPLE_RADIAL' else 2], 
@@ -167,8 +175,9 @@ class Renderer:
                 residuals = lambda params: np.sqrt((x - params[0]) ** 2 + (y - params[1]) ** 2 + (z - params[2]) ** 2) - params[3]
                 result = least_squares(residuals, initial_guess)
                 radius = result.x[3]
+            #print(f"radius = {radius}")
             self.baseline = radius * (args.renderer_baseline_percentage/100)
-
+            #print(f"baseline = {self.baseline}")
         if args.renderer_sort_cameras:
             self.sorted_camera_indices = sort_camera_coordinates(np.array(camera_locations))
             self.poses = self.poses[torch.tensor(self.sorted_camera_indices)]
@@ -205,8 +214,8 @@ class Renderer:
                                }
                               })    
         
-        print(f"num views: {len(self.cameras)}")
-        print(f"baseline: {self.baseline}")
+        #print(f"num views: {len(self.cameras)}")
+        #print(f"baseline: {self.baseline}")
         
         self.left_cameras = [camera['left'] for camera in self.cameras]
 
@@ -320,6 +329,7 @@ class Renderer:
         Returns:
         None
         """
+        #print(f"self.args = {self.args}")
         parser = ArgumentParser(description="Testing script parameters")
         model = ModelParams(parser, sentinel=True)
         pipeline = PipelineParams(parser)
@@ -346,7 +356,8 @@ class Renderer:
                          skip_train=False, 
                          source_path=self.colmap_dir, 
                          target='scene', 
-                         white_background=self.white_background)
+                         white_background=self.white_background,
+                         )
         
         dataset = model.extract(args)
         self.pipeline = pipeline.extract(args)
@@ -354,7 +365,8 @@ class Renderer:
         gaussians = None
         
         with torch.no_grad():
-            self.gaussians = GaussianModel(dataset.sh_degree)
+            self.gaussians = GaussianModel(dataset.sh_degree) # for others
+            #self.gaussians = GaussianModel(args) # for nexusGS
             scene = Scene(dataset, self.gaussians, load_iteration=self.splatting_iteration, shuffle=False)
             bg_color = [1,1,1] if self.white_background else [0, 0, 0]
             self.background = torch.tensor(bg_color, dtype=torch.float32, device=self.device)

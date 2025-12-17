@@ -29,7 +29,7 @@ class ArgParser:
         self.default_values = {
             'colmap_name':{'custom':'sculpture', 'DTU':'scan24', 'TNT':'Ignatius', 'MobileBrick':'aston', 'MipNerf360':'garden'},
             'dataset_name':{'custom':'custom', 'DTU':'DTU', 'TNT':'TNT', 'MobileBrick':'MobileBrick', 'MipNerf360':'MipNerf360'},
-            'downsample':{'custom':1, 'DTU':1, 'TNT':1, 'MobileBrick':1, 'MipNerf360':3},
+            'downsample':{'custom':1, 'DTU':1, 'TNT':1, 'MobileBrick':1, 'MipNerf360':4},
             'renderer_baseline_percentage':{'custom':7.0, 'DTU':7.0, 'TNT':7.0, 'MobileBrick':14.0, 'MipNerf360':7.0},
             'stereo_warm':{'custom':False, 'DTU':True, 'TNT':True, 'MobileBrick':True, 'MipNerf360':False},
             'TSDF_scale':{'custom':1.0, 'DTU':1.0, 'TNT':1.0, 'MobileBrick':0.1, 'MipNerf360':1.0},
@@ -51,7 +51,7 @@ class ArgParser:
         
         # GS params
         self.parser.add_argument('--GS_iterations', type=int, default=30000, help='Number of Gaussian Splatting iterations')
-        self.parser.add_argument('--GS_save_test_iterations', type=int, nargs='+', default=[7000, 30000], help='Gaussian Splatting test iterations to save')
+        self.parser.add_argument('--GS_save_test_iterations', type=int, nargs='+', default=[30000], help='Gaussian Splatting test iterations to save')
         self.parser.add_argument('--GS_white_background', action='store_true', help='Use white background in Gaussian Splatting')
 
         # Renderer params
@@ -119,6 +119,13 @@ class ArgParser:
             self.parser.add_argument('--no-TSDF_use_mask', action='store_false', dest='TSDF_use_mask', help="Disable TSDF_use_mask")
         if self.dataset == 'MipNerf360':
             self.parser.add_argument('--scans', type=str, nargs='+', default=['counter', 'garden'], help='Scan names')
+
+
+
+
+
+
+        
 
     def default_value(self, param):
         """

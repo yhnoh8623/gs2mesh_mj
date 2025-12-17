@@ -1,7 +1,8 @@
 # =============================================================================
 #  Imports
 # =============================================================================
-
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 import os
 from pathlib import Path
 import subprocess
@@ -30,7 +31,14 @@ def run_DTU(args):
     # =============================================================================
     #  Create meshes and evaluate
     # =============================================================================
-    
+    #args.scans = [24, 37, 40, 55, 63, 65, 69, 83, 97, 105, 106, 110, 114, 118, 122]
+    #args.scans = [37, 40, 55, 63, 65, 69, 83, 97, 105, 106, 110, 114, 118, 122]
+
+    #args.scans = [40, 55, 63, 65, 69, 83, 97, 105, 106, 110, 114, 118, 122]
+    ##args.scans = [63]
+    #args.scans = [122]
+    #args.scans = [63]
+    #args.scans = [24]
     for scan_num in args.scans:
 
         # =============================================================================
@@ -39,8 +47,21 @@ def run_DTU(args):
 
         args.colmap_name = f'scan{scan_num}'
         args.GS_port = GS_port_orig + scan_num
+        args.GS_iterations = 10000
+        args.renderer_baseline_percentage = 5
+        args.TSDF_use_occlusion_mask = True
+
         print(args.colmap_name)
         print(args)
+        #args.skip_GS = True
+        #args.skip_rendering = True
+        #args.renderer_baseline_absolute = 0.2012032059515647 # <- 83
+        #args.renderer_baseline_absolute = 0.15564227743447587 # <- 37
+        #args.skip_rendering = True
+        #args.skip_TSDF = True
+        #args.skip_masking = True
+        #args.TSDF_min_depth_baselines = 20
+        args.TSDF_max_depth_baselines = 150
         ply_file = run_single(args)
         
         # =============================================================================
